@@ -45,11 +45,9 @@ while read -r f; do
         #scp -i $sshKeyPath -r $deployFilePath ${e}:$targetFilePath
 
         # rsyncで転送する場合はこの様にする
-        i=0
         for e in ${targetServers[@]}; do
             rsync -r -e "ssh -i $sshKeyPath" --delete $deployFilePath ${e}:$targetFilePath
             echo "server deploy ${e}"
-            let i++
         done
         rm -f $triggerFilePath$triggerFileName 
     fi
