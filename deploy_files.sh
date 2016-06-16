@@ -1,30 +1,90 @@
 #!/bin/bash
-# 特定のディレクトリに指定ファイル名のファイルが作成された時に
-# 他サーバーにファイルをばらまくスクリプト
-# Ctrl+Cで終了できます。
-# 
-# inotify-tools 要インストール
 
 # プロセス監視用（変更不可）
 processName="inotifywait"
 
-# デプロイ用ファイルアップロード先パスを設定
-deployFilePath="/path/to/src/"
+# デプロイ用ファイルアップロード先パスを設定（FTPのカレント）
+srcFilePath="/path/to/dir"
 
-# 展開先のパスを設定
-targetFilePath="/path/to/dest/"
+# 展開先のパスを設定（nginxで静的ファイル用に設定されているディレクトリ）
+destFilePath="/path/to/dir"
 
 # 展開先サーバーの設定（複数設定可。各サーバーにsshでログイン可能にしておく）
-targetServers=("sshuser@192.168.XX.XX" "sshuser@192.168.YY.YY")
+destServers=("sshuser@remotehost:")
 
 # 展開開始用ファイルアップロード先設定
-triggerFilePath="/path/to/trigger/"
+triggerFilePath="/path/to/dir"
+
+# バックアップ作成先ディレクトリ設定
+backupPath="/path/to/dir"
+newBackupPath=${backupPath}/`date "+%Y%m%d"`/
 
 # 展開開始用ファイル名設定
 triggerFileName="deploy"
 
 # ssh_keyパス設定
-sshKeyPath="/path/to/id_rsa"
+sshKeyPath="/path/to/ssh_key"
+
+
+# バックアップをとる
+backup () {
+
+    # 3日以前のバックアップは削除 
+    find $backupPath -mtime +2 -type d | xargs rm -rf
+
+    currentFileName=`date "+%Y%m%d"`
+
+    # 同じ日付のディレクトリを走査
+    files=`ls -dt ${backupPath}/${currentFileName}*`
+
+    # 同じ日付のディレクトリ数
+    filesArray=($files)
+    i=${#filesArray[*]}
+
+    # 同じ日に作られているバックアップがある場合は、末尾をインクリメントして移動
+    for same in $filesArray; do
+        mv ${same} ${backupPath}/${currentFileName}_${i}
+        i=$(( i - 1 ))
+    done
+
+    # 過去のバックアップの最新を取得
+    for newest in `ls -dt $backupPath/*`; do
+        break
+    done
+
+    # 最新のバックアップとの差分を新規バックアップに保存（更新されていないファイルはハードリンク）
+    rsync -va --link-dest=$newest $srcFilePath $newBackupPath
+
+}
+
+# ファイルを同期する
+deploy () {
+    # scpで転送する場合はこの様にする
+    #（削除したファイルが反映できない。転送先パスの指定が一つ上の階層になるので注意）
+    #scp -i $sshKeyPath -r $srcFilePath ${e}:$destFilePath
+
+    # rsyncで転送する場合はこの様にする
+    for e in ${destServers[@]}; do
+        rsync -r -e "ssh -i $sshKeyPath" --delete $srcFilePath ${e}$destFilePath
+        echo "server deploy ${e}"
+    done
+    rm -f $triggerFilePath/$triggerFileName 
+}
+
+normal () {
+    # ディレクトリ監視
+    while read -r f; do
+        if [ $f = $triggerFileName ] ; then
+            backup
+            deploy
+        fi
+    done < <(inotifywait --format '%f' -e create -m $triggerFilePath)
+}
+
+immidiate() {
+    backup
+    deploy
+}
 
 # 重複プロセスの監視
 isAlive=`ps -ef | grep "$processName" | grep -v grep | grep -v srvchk | wc -l`
@@ -33,24 +93,12 @@ if [ $isAlive = 1 ]; then
     exit
 fi
 
-# 強制終了時にinotifywaitも終了させる
-trap 'pgrep -f inotifywait | xargs kill' EXIT
-
-# ディレクトリ監視
-while read -r f; do
-    if [ $f = $triggerFileName ] ; then
-
-        # scpで転送する場合はこの様にする
-        #（削除したファイルが反映できない。転送先パスの指定が一つ上の階層になるので注意）
-        #scp -i $sshKeyPath -r $deployFilePath ${e}:$targetFilePath
-
-        # rsyncで転送する場合はこの様にする
-        for e in ${targetServers[@]}; do
-            rsync -r -e "ssh -i $sshKeyPath" --delete $deployFilePath ${e}:$targetFilePath
-            echo "server deploy ${e}"
-        done
-        rm -f $triggerFilePath$triggerFileName 
-    fi
-done < <(inotifywait --format '%f' -e create -m $triggerFilePath)
-
-
+if [ ! -z "$1" ] && [ $1 = 'now' ]; then
+    # 即時実行
+    immidiate
+else
+    # 終了時にinotifywaitも終了させる
+    trap 'pgrep -f inotifywait | xargs kill' EXIT
+    # 監視実行
+    normal
+fi
