@@ -1,41 +1,41 @@
 #!/bin/bash
-# 特定のディレクトリに指定ファイル名のファイルが作成された時に
-# 他サーバーにファイルをばらまくスクリプト
-# Ctrl+Cで終了できます。
-# 
-# inotify-tools 要インストール
 
+# *********************************************************************
 # プロセス監視用（変更不可）
 processName="inotifywait"
 
-# デプロイ用ファイルアップロード先パスを設定（FTPのカレント）
-srcFilePath="/path/to/dir"
-
-# 展開先のパスを設定（nginxで静的ファイル用に設定されているディレクトリ）
-destFilePath="/path/to/dir"
-
-# 展開先サーバーの設定（複数設定可。各サーバーにsshでログイン可能にしておく）
-destServers=("sshuser@remotehost:")
-
-# 展開開始用ファイルアップロード先設定
-triggerFilePath="/path/to/dir"
-
-# バックアップ作成先ディレクトリ設定
-backupPath="/path/to/dir"
-newBackupPath=${backupPath}/`date "+%Y%m%d"`/
-
 # 展開開始用ファイル名設定
 triggerFileName="deploy"
+restoreFileName="restore"
+# *********************************************************************
+
+# デプロイ用ファイルアップロード先パスを設定（FTPのカレント）
+srcFilePath=""
+
+# 展開先のパスを設定（nginxで静的ファイル用に設定されているディレクトリ）
+destFilePath=""
+
+# 展開先サーバーの設定（複数設定可。各サーバーにsshでログイン可能にしておく）
+destServers=("" "")
+
+# 展開開始用ファイルアップロード先設定
+triggerFilePath=""
+
+# バックアップ作成先ディレクトリ設定
+backupPath=""
+newBackupPath=${backupPath}/`date "+%Y%m%d"`/
 
 # ssh_keyパス設定
-sshKeyPath="/path/to/ssh_key"
+sshKeyPath=""
 
 
 # バックアップをとる
 backup () {
 
+    echo "`date "+%Y/%m/%d %H:%M:%S"`********** BEGIN Backup "
+
     # 3日以前のバックアップは削除 
-    find $backupPath -mtime +2 -type d | xargs rm -rf
+    find $backupPath -maxdepth 1 -mtime +2 -type d | xargs rm -rf
 
     currentFileName=`date "+%Y%m%d"`
 
@@ -58,22 +58,28 @@ backup () {
     done
 
     # 最新のバックアップとの差分を新規バックアップに保存（更新されていないファイルはハードリンク）
-    rsync -va --link-dest=$newest $srcFilePath $newBackupPath
+    rsync -a --link-dest=$newest $destFilePath/ $newBackupPath
 
+    echo "`date "+%Y/%m/%d %H:%M:%S"`********** END   Backup "
+    echo ""
 }
 
 # ファイルを同期する
 deploy () {
-    # scpで転送する場合はこの様にする
-    #（削除したファイルが反映できない。転送先パスの指定が一つ上の階層になるので注意）
-    #scp -i $sshKeyPath -r $srcFilePath ${e}:$destFilePath
 
-    # rsyncで転送する場合はこの様にする
+    echo "`date "+%Y/%m/%d %H:%M:%S"`********** BEGIN Deploy "
+
     for e in ${destServers[@]}; do
-        rsync -r -e "ssh -i $sshKeyPath" --delete $srcFilePath ${e}$destFilePath
-        echo "server deploy ${e}"
+        echo "`date "+%Y/%m/%d %H:%M:%S"`***** BEGIN ${e} Deploy *****"
+        rsync -v -r -e "ssh -i $sshKeyPath" --delete $srcFilePath/ ${e}$destFilePath
+        echo "`date "+%Y/%m/%d %H:%M:%S"`***** END   ${e} Deploy *****"
+        echo ""
     done
+
     rm -f $triggerFilePath/$triggerFileName 
+
+    echo "`date "+%Y/%m/%d %H:%M:%S"`********** END   Deploy "
+    echo ""
 }
 
 normal () {
@@ -83,25 +89,55 @@ normal () {
             backup
             deploy
         fi
+        if [ $f = $restoreFileName ] ; then
+            restore
+            deploy
+        fi
     done < <(inotifywait --format '%f' -e create -m $triggerFilePath)
 }
 
-immidiate() {
-    backup
-    deploy
+restore() {
+
+    echo "`date "+%Y/%m/%d %H:%M:%S"`********** BEGIN Restore "
+
+    # 過去のバックアップの最新を取得
+    for newest in `ls -dt $backupPath/*`; do
+        break
+    done
+
+    if [ -z $newest ]; then
+        exit 1
+    fi
+
+    # 最新のバックアップからアップ用ディレクトリにファイルを復元
+    rm -r $srcFilePath/*
+    cp -pr $newest/* $srcFilePath
+
+    rm -f $triggerFilePath/$restoreFileName 
+
+    echo "`date "+%Y/%m/%d %H:%M:%S"`********** END   Restore "
+    echo ""
 }
+
 
 # 重複プロセスの監視
 isAlive=`ps -ef | grep "$processName" | grep -v grep | grep -v srvchk | wc -l`
 if [ $isAlive = 1 ]; then
-    echo "Already started."
+    echo "started."
     exit
 fi
 
-if [ ! -z "$1" ] && [ $1 = 'now' ]; then
+if [ ! -z "$1" ] && [ $1 = 'deploy' ]; then
     # 即時実行
-    immidiate
+    backup
+    deploy
+elif [ ! -z "$1" ] && [ $1 = 'restore' ]; then
+    # 復元
+    restore
+    deploy
 else
+    # 監視状態の場合は、トリガー用ディレクトリにログを吐く
+    exec >> $triggerFilePath/deploy.log 2>&1
     # 終了時にinotifywaitも終了させる
     trap 'pgrep -f inotifywait | xargs kill' EXIT
     # 監視実行
